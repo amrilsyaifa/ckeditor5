@@ -116,13 +116,6 @@ export default class Renderer {
 		 * @type {null|HTMLElement}
 		 */
 		this._fakeSelectionContainer = null;
-
-		/**
-		 * TODO
-		 * @type {WeakSet<Text>}
-		 * @private
-		 */
-		this._splittedTextNodes = new WeakSet();
 	}
 
 	/**
@@ -400,9 +393,9 @@ export default class Renderer {
 		}
 
 		if ( isInlineFiller( domFillerNode ) ) {
-			domFillerNode.parentNode.removeChild( domFillerNode );
+			remove( domFillerNode );
 		} else {
-			domFillerNode.data = domFillerNode.data.substr( INLINE_FILLER_LENGTH );
+			domFillerNode.deleteData( 0, INLINE_FILLER_LENGTH );
 		}
 
 		this._inlineFiller = null;
@@ -540,7 +533,7 @@ export default class Renderer {
 		}
 
 		const inlineFillerPosition = options.inlineFillerPosition;
-		let actualDomChildren = domElement.childNodes;
+		const actualDomChildren = domElement.childNodes;
 		const expectedDomChildren = Array.from(
 			this.domConverter.viewChildrenToDom( viewElement, domElement.ownerDocument, { bind: true, inlineFillerPosition } )
 		);
@@ -552,15 +545,16 @@ export default class Renderer {
 			addInlineFiller( domElement.ownerDocument, expectedDomChildren, inlineFillerPosition.offset );
 		}
 
-		// Find insertion/deletion positions in text nodes and split them.
-		const { insertionOffsets, deletionOffsets } = findInsertionsAndDeletions( actualDomChildren, expectedDomChildren );
+		// @if CK_DEBUG_RENDERER // const initialNodes = stringifyNodes( actualDomChildren, window.__dragNode );
 
-		this._splitTextNodes( expectedDomChildren, deletionOffsets );
-		this._splitTextNodes( expectedDomChildren, insertionOffsets );
-		this._splitTextNodes( actualDomChildren, deletionOffsets );
-		this._splitTextNodes( actualDomChildren, insertionOffsets );
+		// Find insertion/deletion positions in text nodes...
+		const splitOffsets = findInsertionsAndDeletions( actualDomChildren, expectedDomChildren );
 
-		actualDomChildren = domElement.childNodes;
+		// ...and split them.
+		splitTextNodes( expectedDomChildren, splitOffsets );
+		splitTextNodes( actualDomChildren, splitOffsets );
+
+		// @if CK_DEBUG_RENDERER // const splitNodes = stringifyNodes( actualDomChildren, window.__dragNode );
 
 		// After splitting text nodes we can check the differences for nodes.
 		const actions = this._diffNodeLists( actualDomChildren, expectedDomChildren );
@@ -576,8 +570,18 @@ export default class Renderer {
 		// It doesn't matter in what order we remove or add nodes, as long as we remove and add correct nodes at correct indexes.
 		for ( const action of actions ) {
 			if ( action === 'delete' ) {
-				nodesToUnbind.add( actualDomChildren[ i ] );
-				remove( actualDomChildren[ i ] );
+				const node = actualDomChildren[ i ];
+
+				nodesToUnbind.add( node );
+
+				// Don't remove text nodes, just clear it's content to keep original node.
+				// Those empty nodes will be normalized later.
+				if ( node.nodeType === 3 ) {
+					node.deleteData( 0, node.data.length );
+					i++;
+				} else {
+					remove( node );
+				}
 			} else if ( action === 'equal' ) {
 				i++;
 			}
@@ -587,7 +591,16 @@ export default class Renderer {
 
 		for ( const action of actions ) {
 			if ( action === 'insert' ) {
-				insertAt( domElement, i, expectedDomChildren[ i ] );
+				const actualNode = actualDomChildren[ i ];
+				const expectedNode = expectedDomChildren[ i ];
+
+				// Inject new text into existing text node to keep the original text node in the document.
+				if ( actualNode && expectedNode.nodeType === 3 && actualNode.nodeType === 3 ) {
+					actualNode.insertData( 0, expectedNode.data );
+				} else {
+					insertAt( domElement, i, expectedNode );
+				}
+
 				i++;
 			} else if ( action === 'equal' ) {
 				// Force updating text nodes inside elements which did not change and do not need to be re-rendered (#1125).
@@ -597,8 +610,13 @@ export default class Renderer {
 			}
 		}
 
+		// @if CK_DEBUG_RENDERER // const resultNodes = stringifyNodes( actualDomChildren, window.__dragNode );
+
 		// Normalization of split text nodes. This is not using normalize method to keep the original node in the document.
-		this._normalizeNodes( domElement );
+		normalizeTextNodes( actualDomChildren );
+
+		// @if CK_DEBUG_RENDERER // const normalizedNodes = stringifyNodes( actualDomChildren, window.__dragNode );
+		// @if CK_DEBUG_RENDERER // console.log( initialNodes, ' --> ', splitNodes, ' --> ', resultNodes, ' --> ', normalizedNodes );
 
 		// Unbind removed nodes. When node does not have a parent it means that it was removed from DOM tree during
 		// comparison with the expected DOM. We don't need to check child nodes, because if child node was reinserted,
@@ -889,76 +907,6 @@ export default class Renderer {
 			}
 		}
 	}
-
-	/**
-	 * TODO
-	 * @param nodes
-	 * @param offsets
-	 * @private
-	 */
-	_splitTextNodes( nodes, offsets ) {
-		for ( const offset of offsets ) {
-			let idx = 0;
-			let node = null;
-			let nodeIndex = 0;
-
-			for ( nodeIndex = 0; nodeIndex < nodes.length; nodeIndex++ ) {
-				node = nodes[ nodeIndex ];
-				const nodeSize = node.nodeType == 3 ? node.data.length : 1;
-
-				if ( offset < idx + nodeSize ) {
-					break;
-				}
-
-				idx += nodeSize;
-			}
-
-			const nodeOffset = offset - idx;
-
-			if ( isText( node ) && nodeOffset > 0 && nodeOffset < node.data.length ) {
-				const newNode = node.splitText( nodeOffset );
-
-				this._splittedTextNodes.add( node );
-
-				if ( Array.isArray( nodes ) ) {
-					nodes.splice( nodeIndex + 1, 0, newNode );
-				} else {
-					nodes = node.parentNode.childNodes;
-				}
-			}
-		}
-	}
-
-	/**
-	 * TODO
-	 * @param domElement
-	 * @private
-	 */
-	_normalizeNodes( domElement ) {
-		// Normalization of split text nodes. This is not using normalize method to keep the original node in the document.
-		for ( const node of domElement.childNodes ) {
-			if ( node.nodeType === 3 && this._splittedTextNodes.has( node ) ) {
-				while ( node.previousSibling && node.previousSibling.nodeType === 3 ) {
-					node.insertData( 0, node.previousSibling.data );
-					remove( node.previousSibling, 1 );
-				}
-
-				while ( node.nextSibling && node.nextSibling.nodeType === 3 ) {
-					node.appendData( node.nextSibling.data );
-					remove( node.nextSibling, 1 );
-				}
-			}
-		}
-
-		for ( const node of domElement.childNodes ) {
-			if ( node.nodeType === 3 ) {
-				while ( node.nextSibling && node.nextSibling.nodeType === 3 ) {
-					node.appendData( node.nextSibling.data );
-					remove( node.nextSibling, 1 );
-				}
-			}
-		}
-	}
 }
 
 mix( Renderer, ObservableMixin );
@@ -993,7 +941,7 @@ function addInlineFiller( domDocument, domParentOrArray, offset ) {
 	const nodeAfterFiller = childNodes[ offset ];
 
 	if ( isText( nodeAfterFiller ) ) {
-		nodeAfterFiller.data = INLINE_FILLER + nodeAfterFiller.data;
+		nodeAfterFiller.insertData( 0, INLINE_FILLER );
 
 		return nodeAfterFiller;
 	} else {
@@ -1042,7 +990,7 @@ function sameNodes( domConverter, actualDomChild, expectedDomChild ) {
 	}
 	// Texts.
 	else if ( isText( actualDomChild ) && isText( expectedDomChild ) ) {
-		return actualDomChild.data.replace( /\u00A0/g, ' ' ) === expectedDomChild.data.replace( /\u00A0/g, ' ' );
+		return actualDomChild.data === expectedDomChild.data;
 	}
 	// Block fillers.
 	else if ( domConverter.isBlockFiller( actualDomChild ) &&
@@ -1119,12 +1067,14 @@ function createFakeSelectionContainer( domDocument ) {
 	return container;
 }
 
-// TODO
+// Returns offsets in the content where there are insertions or deletions.
+//
+// @param {NodeList} actualDomChildren
+// @param {Array.<Node>} expectedDomChildren
+// @returns {Array.<Number>}
 function findInsertionsAndDeletions( actualDomChildren, expectedDomChildren ) {
-	const actualText = Array.from( actualDomChildren )
-		.map( node => node.nodeType == 3 ? node.data : '@' ).join( '' ).replace( /\u00A0/g, ' ' );
-	const expectedText = Array.from( expectedDomChildren )
-		.map( node => node.nodeType == 3 ? node.data : '@' ).join( '' ).replace( /\u00A0/g, ' ' );
+	const actualText = Array.from( actualDomChildren ).map( node => node.nodeType == 3 ? node.data : '@' ).join( '' );
+	const expectedText = Array.from( expectedDomChildren ).map( node => node.nodeType == 3 ? node.data : '@' ).join( '' );
 
 	const changes = diff( actualText, expectedText );
 
@@ -1141,5 +1091,91 @@ function findInsertionsAndDeletions( actualDomChildren, expectedDomChildren ) {
 		}
 	}
 
-	return { deletionOffsets, insertionOffsets };
+	return [ ...deletionOffsets, ...insertionOffsets ];
 }
+
+// Splits text nodes from the nodes list at the specified content offsets.
+//
+// @param {NodeList|Array.<Node>} nodes
+// @param {Array.<Number>} offsets
+function splitTextNodes( nodes, offsets ) {
+	for ( const offset of offsets ) {
+		let node = null;
+		let nodeIndex = 0;
+		let nodeOffset = 0;
+
+		// Searching for the specified offset in nodes list.
+		for ( nodeIndex = 0; nodeIndex < nodes.length; nodeIndex++ ) {
+			node = nodes[ nodeIndex ];
+
+			const nodeSize = node.nodeType === 3 ? node.data.length : 1;
+
+			if ( offset < nodeOffset + nodeSize ) {
+				break;
+			}
+
+			nodeOffset += nodeSize;
+		}
+
+		if ( node.nodeType !== 3 ) {
+			continue;
+		}
+
+		// Split text node.
+		const nodeLocalOffset = offset - nodeOffset;
+
+		if ( nodeLocalOffset > 0 && nodeLocalOffset < node.data.length ) {
+			const newNode = node.splitText( nodeLocalOffset );
+
+			// Update nodes array, NodeList is live so it does not need refreshing.
+			if ( Array.isArray( nodes ) ) {
+				nodes.splice( nodeIndex + 1, 0, newNode );
+			}
+		}
+	}
+}
+
+// Normalization of split text nodes. Joins sibling text nodes with preserving same leftmost text node in the document.
+//
+// @param {NodeList} nodes
+function normalizeTextNodes( nodes ) {
+	// Join sibling text nodes.
+	for ( let i = 0; i < nodes.length; i++ ) {
+		const node = nodes[ i ];
+
+		if ( node.nodeType !== 3 ) {
+			continue;
+		}
+
+		while ( node.nextSibling && node.nextSibling.nodeType === 3 ) {
+			if ( isInlineFiller( node ) ) {
+				node.nextSibling.insertData( 0, node.data );
+				remove( node );
+				i--;
+			} else {
+				node.appendData( node.nextSibling.data );
+				remove( node.nextSibling );
+			}
+		}
+
+		// Remove empty text node.
+		if ( !node.data.length && node.parentNode ) {
+			remove( node );
+			i--;
+		}
+	}
+}
+
+// @if CK_DEBUG_RENDERER // function stringifyNodes( nodes, highlightNode = null ) {
+// @if CK_DEBUG_RENDERER // 	return Array.from( nodes )
+// @if CK_DEBUG_RENDERER // 		.map( node => {
+// @if CK_DEBUG_RENDERER // 			if ( node.nodeType !== 3 ) {
+// @if CK_DEBUG_RENDERER // 				return '@';
+// @if CK_DEBUG_RENDERER // 			}
+// @if CK_DEBUG_RENDERER //
+// @if CK_DEBUG_RENDERER // 			const text = node.data.replace( INLINE_FILLER, '#' );
+// @if CK_DEBUG_RENDERER //
+// @if CK_DEBUG_RENDERER // 			return node === highlightNode ? `<${ text }>` : `'${ text }'`;
+// @if CK_DEBUG_RENDERER // 		} )
+// @if CK_DEBUG_RENDERER // 		.join( ',' );
+// @if CK_DEBUG_RENDERER // }
