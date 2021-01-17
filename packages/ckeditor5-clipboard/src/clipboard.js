@@ -171,10 +171,7 @@ export default class Clipboard extends Plugin {
 				}
 
 				model.change( writer => {
-					// Remove dragged content from it's original position.
-					const dropEffect = env.isGecko ? data.dataTransfer.dropEffect : data.dataTransfer.effectAllowed;
-
-					this._finalizeDragging( [ 'move', 'copyMove' ].includes( dropEffect ) );
+					this._removeDraggingMarkers();
 
 					// Plain text can be determined based on event flag (#7799) or auto detection (#1006). If detected
 					// preserve selection attributes on pasted items.
@@ -289,8 +286,7 @@ export default class Clipboard extends Plugin {
 			viewDocument.fire( 'clipboardOutput', { dataTransfer: data.dataTransfer, content, method: evt.name } );
 		}, { priority: 'low' } );
 
-		// TODO this is not fired if source text node got removed while downcasting marker
-		//  (it's not possible to move to other editor, only copy).
+		// This is not fired if source text node got removed while downcasting marker.
 		this.listenTo( viewDocument, 'dragend', ( evt, data ) => {
 			this._finalizeDragging( !data.dataTransfer.isCanceled && data.dataTransfer.dropEffect == 'move' );
 		}, { priority: 'low' } );
