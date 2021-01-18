@@ -616,7 +616,7 @@ export default class Renderer {
 		normalizeTextNodes( actualDomChildren );
 
 		// @if CK_DEBUG_RENDERER // const normalizedNodes = stringifyNodes( actualDomChildren, window.__dragNode );
-		// @if CK_DEBUG_RENDERER // console.log( initialNodes, ' --> ', splitNodes, ' --> ', resultNodes, ' --> ', normalizedNodes );
+		// @if CK_DEBUG_RENDERER // console.log( [ initialNodes, splitNodes, resultNodes, normalizedNodes ].join( ' --> ' ) );
 
 		// Unbind removed nodes. When node does not have a parent it means that it was removed from DOM tree during
 		// comparison with the expected DOM. We don't need to check child nodes, because if child node was reinserted,
@@ -1086,7 +1086,15 @@ function findInsertionsAndDeletions( actualDomChildren, expectedDomChildren ) {
 			deletionOffsets.push( i );
 		}
 
+		if ( changes[ i ] !== 'delete' && changes[ i - 1 ] === 'delete' ) {
+			deletionOffsets.push( i );
+		}
+
 		if ( changes[ i ] === 'insert' && changes[ i - 1 ] !== 'insert' ) {
+			insertionOffsets.push( i );
+		}
+
+		if ( changes[ i ] !== 'insert' && changes[ i - 1 ] === 'insert' ) {
 			insertionOffsets.push( i );
 		}
 	}
@@ -1170,12 +1178,12 @@ function normalizeTextNodes( nodes ) {
 // @if CK_DEBUG_RENDERER // 	return Array.from( nodes )
 // @if CK_DEBUG_RENDERER // 		.map( node => {
 // @if CK_DEBUG_RENDERER // 			if ( node.nodeType !== 3 ) {
-// @if CK_DEBUG_RENDERER // 				return '@';
+// @if CK_DEBUG_RENDERER // 				return `<${ node.tagName.toLowerCase() }>`;
 // @if CK_DEBUG_RENDERER // 			}
 // @if CK_DEBUG_RENDERER //
 // @if CK_DEBUG_RENDERER // 			const text = node.data.replace( INLINE_FILLER, '#' );
 // @if CK_DEBUG_RENDERER //
-// @if CK_DEBUG_RENDERER // 			return node === highlightNode ? `<${ text }>` : `'${ text }'`;
+// @if CK_DEBUG_RENDERER // 			return node === highlightNode ? `[${ text }]` : `'${ text }'`;
 // @if CK_DEBUG_RENDERER // 		} )
 // @if CK_DEBUG_RENDERER // 		.join( ',' );
 // @if CK_DEBUG_RENDERER // }
