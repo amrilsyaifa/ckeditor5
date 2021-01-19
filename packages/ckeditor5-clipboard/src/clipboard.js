@@ -113,7 +113,6 @@ export default class Clipboard extends Plugin {
 		}, { priority: 'highest' } );
 
 		this.listenTo( viewDocument, 'clipboardInput', ( evt, data ) => {
-			const selection = editor.model.document.selection;
 			const dataTransfer = data.dataTransfer;
 			let content = '';
 
@@ -123,45 +122,15 @@ export default class Clipboard extends Plugin {
 				content = plainTextToHtml( dataTransfer.getData( 'text/plain' ) );
 			}
 
-			if ( data.method == 'drop' ) {
-				const targetRange = findDropTargetRange( editor, data.targetRanges, data.target );
-
-				if ( targetRange ) {
-					editor.model.change( writer => {
-						writer.setSelection( targetRange );
-					} );
-				} else {
-					this._finalizeDragging( false );
-
-					return;
-				}
-
-				// Since we can't rely on the dragend event, we must check if the local dragRange is from the current drag & drop
-				// or it's from some previous not cleared one.
-				if ( this._draggedRange && this._draggingUid != dataTransfer.getData( 'application/ckeditor5-dragging-uid' ) ) {
-					this._draggedRange.detach();
-					this._draggedRange = null;
-					this._draggingUid = '';
-				}
-
-				// Don't do anything if some content was dragged within the same document to the same position.
-				if (
-					getFinalDropEffect( dataTransfer ) == 'move' &&
-					this._draggedRange && this._draggedRange.containsRange( selection.getFirstRange(), true )
-				) {
-					this._finalizeDragging( false );
-
-					return;
-				}
-			}
-
 			content = this.editor.data.htmlProcessor.toView( content );
 
 			const eventInfo = new EventInfo( this, 'inputTransformation' );
 			this.fire( eventInfo, {
 				content,
 				dataTransfer,
-				asPlainText: data.asPlainText
+				targetRanges: data.targetRanges,
+				asPlainText: data.asPlainText,
+				method: data.method
 			} );
 
 			// If CKEditor handled the input, do not bubble the original event any further.
@@ -175,56 +144,66 @@ export default class Clipboard extends Plugin {
 		}, { priority: 'low' } );
 
 		this.listenTo( this, 'inputTransformation', ( evt, data ) => {
-			if ( !data.content.isEmpty ) {
-				const dataController = this.editor.data;
-				const model = this.editor.model;
-				const selection = model.document.selection;
+			if ( data.content.isEmpty ) {
+				return;
+			}
 
-				// Convert the pasted content to a model document fragment.
-				// Conversion is contextual, but in this case we need an "all allowed" context and for that
-				// we use the $clipboardHolder item.
-				const modelFragment = dataController.toModel( data.content, '$clipboardHolder' );
+			const dataController = this.editor.data;
+			const model = this.editor.model;
+			const selection = model.document.selection;
 
-				if ( modelFragment.childCount == 0 ) {
-					return;
+			// Convert the pasted content to a model document fragment.
+			// Conversion is contextual, but in this case we need an "all allowed" context and for that
+			// we use the $clipboardHolder item.
+			const modelFragment = dataController.toModel( data.content, '$clipboardHolder' );
+
+			if ( modelFragment.childCount == 0 ) {
+				return;
+			}
+
+			model.change( writer => {
+				let liveTargetRange = null;
+
+				// Remove dragged content from it's original position.
+				if ( data.method == 'drop' ) {
+					liveTargetRange = LiveRange.fromRange( data.targetRanges[ 0 ] );
+
+					this._finalizeDragging( getFinalDropEffect( data.dataTransfer ) == 'move' );
 				}
 
-				model.change( writer => {
-					// Remove dragged content from it's original position.
-					// Note: This should be handled in 'dragend' event but if the DOM text node is removed from the document
-					// during dragging, then 'dragend' event is never dispatched. Here should be just a `this._removeDraggingMarkers();`
-					this._finalizeDragging( getFinalDropEffect( data.dataTransfer ) == 'move' );
+				// Plain text can be determined based on event flag (#7799) or auto detection (#1006). If detected
+				// preserve selection attributes on pasted items.
+				if ( data.asPlainText || isPlainTextFragment( modelFragment, model.schema ) ) {
+					// Formatting attributes should be preserved.
+					const textAttributes = Array.from( selection.getAttributes() )
+						.filter( ( [ key ] ) => model.schema.getAttributeProperties( key ).isFormatting );
 
-					// Plain text can be determined based on event flag (#7799) or auto detection (#1006). If detected
-					// preserve selection attributes on pasted items.
-					if ( data.asPlainText || isPlainTextFragment( modelFragment, model.schema ) ) {
-						// Formatting attributes should be preserved.
-						const textAttributes = Array.from( selection.getAttributes() )
-							.filter( ( [ key ] ) => model.schema.getAttributeProperties( key ).isFormatting );
-
-						if ( !selection.isCollapsed ) {
-							model.deleteContent( selection, { doNotAutoparagraph: true } );
-						}
-
-						// But also preserve other attributes if they survived the content deletion (because they were not fully selected).
-						// For example linkHref is not a formatting attribute but it should be preserved if pasted text was in the middle
-						// of a link.
-						textAttributes.push( ...selection.getAttributes() );
-
-						const range = writer.createRangeIn( modelFragment );
-
-						for ( const item of range.getItems() ) {
-							if ( item.is( '$text' ) || item.is( '$textProxy' ) ) {
-								writer.setAttributes( textAttributes, item );
-							}
-						}
+					if ( !selection.isCollapsed ) {
+						model.deleteContent( selection, { doNotAutoparagraph: true } );
 					}
 
-					model.insertContent( modelFragment );
-				} );
+					// But also preserve other attributes if they survived the content deletion (because they were not fully selected).
+					// For example linkHref is not a formatting attribute but it should be preserved if pasted text was in the middle
+					// of a link.
+					textAttributes.push( ...selection.getAttributes() );
 
-				evt.stop();
-			}
+					const range = writer.createRangeIn( modelFragment );
+
+					for ( const item of range.getItems() ) {
+						if ( item.is( '$text' ) || item.is( '$textProxy' ) ) {
+							writer.setAttributes( textAttributes, item );
+						}
+					}
+				}
+
+				model.insertContent( modelFragment, liveTargetRange && liveTargetRange.toRange() );
+
+				if ( liveTargetRange ) {
+					liveTargetRange.detach();
+				}
+			} );
+
+			evt.stop();
 		}, { priority: 'low' } );
 	}
 
@@ -341,10 +320,57 @@ export default class Clipboard extends Plugin {
 
 			if ( targetRange ) {
 				this._updateMarkersThrottled( targetRange );
-			} else {
-				data.dataTransfer.dropEffect = 'none';
 			}
 		}, { priority: 'low' } );
+
+		// Update the selection for dropping.
+		this.listenTo( viewDocument, 'clipboardInput', ( evt, data ) => {
+			if ( data.method != 'drop' ) {
+				return;
+			}
+
+			let targetRange = findDropTargetRange( editor, data.targetRanges, data.target );
+			const liveTargetRange = LiveRange.fromRange( targetRange );
+
+			// The dragging markers must be removed after searching for the target range because sometimes
+			// the target lands on the marker itself.
+			this._removeDraggingMarkers();
+
+			targetRange = liveTargetRange.toRange();
+			liveTargetRange.detach();
+
+			if ( !targetRange ) {
+				this._finalizeDragging( false );
+				evt.stop();
+
+				return;
+			}
+
+			// Update the selection so other handlers can use this.
+			editor.model.change( writer => {
+				writer.setSelection( targetRange );
+			} );
+
+			// Override the target ranges with the one adjusted to the best one for a drop.
+			data.targetRanges = [ targetRange ];
+
+			// Since we can't rely on the dragend event, we must check if the local dragRange is from the current drag & drop
+			// or it's from some previous not cleared one.
+			if ( this._draggedRange && this._draggingUid != data.dataTransfer.getData( 'application/ckeditor5-dragging-uid' ) ) {
+				this._draggedRange.detach();
+				this._draggedRange = null;
+				this._draggingUid = '';
+			}
+
+			// Don't do anything if some content was dragged within the same document to the same position.
+			const isMove = getFinalDropEffect( data.dataTransfer ) == 'move';
+			const selection = editor.model.document.selection;
+
+			if ( isMove && this._draggedRange && this._draggedRange.containsRange( selection.getFirstRange(), true ) ) {
+				this._finalizeDragging( false );
+				evt.stop();
+			}
+		}, { priority: 'high' } );
 
 		this._updateMarkersThrottled = throttle( targetRange => {
 			const editor = this.editor;
@@ -374,15 +400,12 @@ export default class Clipboard extends Plugin {
 		editor.conversion.for( 'editingDowncast' ).markerToElement( {
 			model: 'drop-target:position',
 			view: ( data, { writer } ) => {
-				// Check in schema to place UIElement only in place where text is allowed.
-				if ( !editor.model.schema.checkChild( data.markerRange.start, '$text' ) ) {
-					return;
-				}
+				const inText = editor.model.schema.checkChild( data.markerRange.start, '$text' );
 
-				return writer.createUIElement( 'span', { class: 'ck-drop-target__position' }, function( domDocument ) {
+				return writer.createUIElement( inText ? 'span' : 'div', { class: 'ck-drop-target__position' }, function( domDocument ) {
 					const domElement = this.toDomElement( domDocument );
 
-					domElement.innerHTML = '&#8203;<span class="ck-drop-target__line"></span>';
+					domElement.innerHTML = ( inText ? '&#8203;' : '' ) + '<span class="ck-drop-target__line"></span>';
 
 					return domElement;
 				} );
@@ -451,7 +474,16 @@ export default class Clipboard extends Plugin {
 
 		// Delete moved content.
 		if ( moved ) {
-			model.deleteContent( model.createSelection( this._draggedRange ), { doNotAutoparagraph: true } );
+			model.change( () => {
+				model.deleteContent( model.createSelection( this._draggedRange ), { doNotAutoparagraph: true } );
+
+				// Remove the parent block if all content of the block was moved.
+				const parent = this._draggedRange.start.parent;
+
+				if ( parent.isEmpty ) {
+					model.deleteContent( model.createSelection( parent, 'on' ), { doNotAutoparagraph: true } );
+				}
+			} );
 		}
 
 		this._draggedRange.detach();
@@ -584,8 +616,18 @@ function findDropTargetRange( editor, targetViewRanges, targetViewElement ) {
 	const view = editor.editing.view;
 
 	const targetViewPosition = targetViewRanges ? targetViewRanges[ 0 ].start : null;
-	const targetModelPosition = targetViewPosition ? mapper.toModelPosition( targetViewPosition ) : null;
 
+	// TODO why sometimes this position is inside text node that is not attached to the document?
+	if ( !targetViewPosition.parent.parent ) {
+		return null;
+	}
+
+	// TODO this happens for horizontal drop placeholder.
+	if ( targetViewElement.is( 'uiElement' ) ) {
+		targetViewElement = targetViewElement.parent;
+	}
+
+	const targetModelPosition = targetViewPosition ? mapper.toModelPosition( targetViewPosition ) : null;
 	let targetModelElement = mapper.toModelElement( targetViewElement );
 
 	// Find mapped ancestor if the target is inside the UIElement or any not mapped element.
@@ -594,6 +636,13 @@ function findDropTargetRange( editor, targetViewRanges, targetViewElement ) {
 	}
 
 	// console.log( 'element:', targetModelElement.name, '-', 'path:', targetModelPosition ? `[${ targetModelPosition.path }]` : 'n/a' );
+
+	// Check if this target position should not be between blocks.
+	if ( targetModelPosition && model.schema.checkChild( targetModelElement, '$block' ) ) {
+		const commonPath = targetModelPosition.path.slice( 0, model.createPositionAt( targetModelElement, 0 ).path.length );
+
+		return model.createRange( model.createPositionFromPath( targetModelPosition.root, commonPath ) );
+	}
 
 	// In Safari target position can be empty while hovering over a widget (for example page-break).
 	// In all browsers there is no target position while hovering over an empty table cell.
