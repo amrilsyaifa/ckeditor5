@@ -19,10 +19,11 @@ import viewToPlainText from './utils/viewtoplaintext.js';
 import EventInfo from '@ckeditor/ckeditor5-utils/src/eventinfo';
 import LiveRange from '@ckeditor/ckeditor5-engine/src/model/liverange';
 import MouseObserver from '@ckeditor/ckeditor5-engine/src/view/observer/mouseobserver';
+import uid from '@ckeditor/ckeditor5-utils/src/uid';
 import env from '@ckeditor/ckeditor5-utils/src/env';
 import { isWidget } from '@ckeditor/ckeditor5-widget/src/utils';
-import { throttle } from 'lodash-es';
 
+import { throttle } from 'lodash-es';
 import '../theme/clipboard.css';
 
 /**
@@ -61,6 +62,13 @@ export default class Clipboard extends Plugin {
 		 * @private
 		 */
 		this._draggedRange = null;
+
+		/**
+		 * TODO
+		 * @type {String}
+		 * @private
+		 */
+		this._draggingUid = '';
 
 		/**
 		 * TODO
@@ -128,8 +136,19 @@ export default class Clipboard extends Plugin {
 					return;
 				}
 
+				// Since we can't rely on the dragend event, we must check if the local dragRange is from the current drag & drop
+				// or it's from some previous not cleared one.
+				if ( this._draggedRange && this._draggingUid != dataTransfer.getData( 'application/ckeditor5-dragging-uid' ) ) {
+					this._draggedRange.detach();
+					this._draggedRange = null;
+					this._draggingUid = '';
+				}
+
 				// Don't do anything if some content was dragged within the same document to the same position.
-				if ( this._draggedRange && this._draggedRange.containsRange( selection.getFirstRange(), true ) ) {
+				if (
+					getFinalDropEffect( dataTransfer ) == 'move' &&
+					this._draggedRange && this._draggedRange.containsRange( selection.getFirstRange(), true )
+				) {
 					this._finalizeDragging( false );
 
 					return;
@@ -171,7 +190,10 @@ export default class Clipboard extends Plugin {
 				}
 
 				model.change( writer => {
-					this._removeDraggingMarkers();
+					// Remove dragged content from it's original position.
+					// Note: This should be handled in 'dragend' event but if the DOM text node is removed from the document
+					// during dragging, then 'dragend' event is never dispatched. Here should be just a `this._removeDraggingMarkers();`
+					this._finalizeDragging( getFinalDropEffect( data.dataTransfer ) == 'move' );
 
 					// Plain text can be determined based on event flag (#7799) or auto detection (#1006). If detected
 					// preserve selection attributes on pasted items.
@@ -271,17 +293,17 @@ export default class Clipboard extends Plugin {
 				return;
 			}
 
-			// @if CK_DEBUG_RENDERER // window.__dragNode = data.domTarget;
-
 			// TODO we could clone this node somewhere and style it to match editing view but without handles,
 			//  selection outline, WTA buttons, etc.
 			// data.dataTransfer._native.setDragImage( data.domTarget, 0, 0 );
 
+			this._draggedRange = LiveRange.fromRange( modelDocument.selection.getFirstRange() );
+			this._draggingUid = uid();
+
 			data.dataTransfer.effectAllowed = 'copyMove';
+			data.dataTransfer.setData( 'application/ckeditor5-dragging-uid', this._draggingUid );
 
 			const content = editor.data.toView( editor.model.getSelectedContent( modelDocument.selection ) );
-
-			this._draggedRange = LiveRange.fromRange( modelDocument.selection.getFirstRange() );
 
 			viewDocument.fire( 'clipboardOutput', { dataTransfer: data.dataTransfer, content, method: evt.name } );
 		}, { priority: 'low' } );
@@ -310,6 +332,12 @@ export default class Clipboard extends Plugin {
 			}
 
 			const targetRange = findDropTargetRange( editor, data.targetRanges, data.target );
+
+			// This is content being dragged from other editor or content.
+			// Moving out of current editor instance is not possible until 'dragend' event case will be fixed.
+			if ( !this._draggedRange ) {
+				data.dataTransfer.dropEffect = 'copy';
+			}
 
 			if ( targetRange ) {
 				this._updateMarkersThrottled( targetRange );
@@ -414,6 +442,8 @@ export default class Clipboard extends Plugin {
 
 		this._removeDraggingMarkers();
 		this._clearDraggableAttributes();
+
+		this._draggingUid = '';
 
 		if ( !this._draggedRange ) {
 			return;
@@ -596,4 +626,13 @@ function findObjectAncestorRange( model, element ) {
 	}
 
 	return null;
+}
+
+// TODO
+function getFinalDropEffect( dataTransfer ) {
+	if ( env.isGecko ) {
+		return dataTransfer.dropEffect;
+	}
+
+	return dataTransfer.effectAllowed == 'copyMove' ? 'move' : 'copy';
 }
